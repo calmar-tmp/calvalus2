@@ -96,12 +96,12 @@ public class DefaultInventoryService implements InventoryService {
                         for (String item : productSet.getGeoInventory().split(",")) {
                             if (item.startsWith("file:") && !withExternalAccessControl) {
                                 LocalFileSystem.newInstance(new Configuration()).exists(new Path(item + "/" + ProductSetPersistable.INDEX));
-                            } else {
+                            } else if (! item.startsWith("catalogue")) {
                                 fileSystem.exists(fileSystemService.makeQualified(fileSystem, item + "/" + ProductSetPersistable.INDEX));
                             }
                         }
                     }
-                    if (productSet.getPath() != null) {
+                    if (productSet.getPath() != null && productSet.getPath().length() > 0) {
                         for (String item : productSet.getPath().split(",")) {
                             item = item.replaceAll("\\$", "_");
                             if (item.startsWith("file:") && !withExternalAccessControl) {
@@ -153,7 +153,10 @@ public class DefaultInventoryService implements InventoryService {
             for (Path path : paths) {
                 try {
                     productSetList.addAll(readProductSetFile(fileSystem, path));
-                } catch (AccessControlException ignore) {}
+                } catch (AccessControlException ignore) {
+                } catch (Exception ignore) {
+                    LOG.severe("error parsing product set at " + path + ": " + ignore);
+                }
             }
             return productSetList.toArray(new ProductSet[0]);
         }

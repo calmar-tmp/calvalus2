@@ -113,7 +113,17 @@ public abstract class ProcessorAdapter {
             System.setProperty("snap.userdir", cwd);
             System.setProperty("snap.home", cwd);
             System.setProperty("snap.pythonModuleDir", cwd);
+            System.setProperty("java.io.tmpdir", cwd);
             LOG.info("Set 'snap.userdir', 'snap.home', 'snap.pythonModuleDir' to CWD: " + cwd);
+            if (conf.get("snap.gpf.allowAuxdataDownload") == null) {
+                System.setProperty("snap.gpf.allowAuxdataDownload", "false");
+            }
+        }
+        // we need the auxdata tree before the engine is started
+        try {
+            shallowCopyPatches(new File(".").getAbsolutePath());
+        } catch (IOException e) {
+            throw new RuntimeException("processor adapter initialisation failed", e);
         }
         GpfUtils.init(conf);
         Engine.start();
@@ -134,10 +144,11 @@ public abstract class ProcessorAdapter {
 
     /**
      * Prepares the processing.
-     * The default implementation does nothing except creating a shallow copy tree with symlinks to files of patch packages.
+     * The default implementation does nothing.
+     * The creation of a shallow copy tree with symlinks to files of patch packages has been moved to before engine start.
      */
     public void prepareProcessing() throws IOException {
-        shallowCopyPatches(new File(".").getAbsolutePath());
+        //shallowCopyPatches(new File(".").getAbsolutePath());
     }
 
     protected static void shallowCopyPatches(String wd) throws IOException {
@@ -345,7 +356,7 @@ public abstract class ProcessorAdapter {
      * Returns parameters from TableInputFormat/ParameterizedSplit, or empty array for other input formats.
      * The return value is encoded as key1, value1, key2, value2 ... in a string array
      */
-    protected String[] getInputParameters() {
+    public String[] getInputParameters() {
         if (inputSplit instanceof ParameterizedSplit) {
             return ((ParameterizedSplit) inputSplit).getParameters();
         } else {
@@ -369,8 +380,15 @@ public abstract class ProcessorAdapter {
         //}
 
         if (inputRectangle == null) {
-            String geometryWkt = getConfiguration().get(JobConfigNames.CALVALUS_REGION_GEOMETRY);
             boolean fullSwath = getConfiguration().getBoolean(JobConfigNames.CALVALUS_INPUT_FULL_SWATH, false);
+            String geometryWkt = getConfiguration().get(JobConfigNames.CALVALUS_REGION_GEOMETRY);
+            // check table for table input format
+            for (int i=0; i<getInputParameters().length; i += 2) {
+                if ("regionGeometry".equals(getInputParameters()[i])) {
+                    geometryWkt = getInputParameters()[i+1];
+                    break;
+                }
+            }
             Geometry regionGeometry = GeometryUtils.createGeometry(geometryWkt);
             LOG.info("getInputRectangle: for geometryWkt = " + geometryWkt);
             ProcessingRectangleCalculator calculator = new ProcessingRectangleCalculator(regionGeometry,

@@ -84,7 +84,11 @@ public class ExecutableProcessorAdapter extends ProcessorAdapter {
         if (getInputParameters().length > 0) {
             final StringBuilder accu = new StringBuilder(processorParameters);
             for (int i=0; i<getInputParameters().length; i+=2) {
-                if (!"output".equals(getInputParameters()[i])) {
+                if ("output".equals(getInputParameters()[i])) {
+                    // skip, will be considered in finalise
+                } else if ("regionGeometry".equals(getInputParameters()[i])) {
+                    conf.set("calvalus.regionGeometry", getInputParameters()[i + 1]);
+                } else {
                     if (accu.length() > 0) {
                         accu.append('\n');
                     }
@@ -155,7 +159,11 @@ public class ExecutableProcessorAdapter extends ProcessorAdapter {
         Rectangle inputRectangle = getInputRectangle();
         if (inputRectangle != null) {
             Product inputProduct = getInputProduct();
-            productRect = new Rectangle(inputProduct.getSceneRasterWidth(), inputProduct.getSceneRasterHeight());
+            if (inputProduct != null) {
+                productRect = new Rectangle(inputProduct.getSceneRasterWidth(), inputProduct.getSceneRasterHeight());
+            } else {
+                productRect = inputRectangle;
+            }
         }
 
         outputFilesNames = processInput(pm, inputRectangle, inputPath, inputFile, productRect, null);
@@ -194,7 +202,11 @@ public class ExecutableProcessorAdapter extends ProcessorAdapter {
         if (getInputParameters().length > 0) {
             final StringBuilder accu = new StringBuilder(processorParameters);
             for (int i=0; i<getInputParameters().length; i+=2) {
-                if (! "output".equals(getInputParameters()[i])) {
+                if ("output".equals(getInputParameters()[i])) {
+                    // skip, will be considered in finalise
+                } else if ("regionGeometry".equals(getInputParameters()[i])) {
+                    conf.set("calvalus.regionGeometry", getInputParameters()[i + 1]);
+                } else {
                     if (accu.length() > 0) {
                         accu.append('\n');
                     }
@@ -312,10 +324,15 @@ public class ExecutableProcessorAdapter extends ProcessorAdapter {
         Configuration conf = getConfiguration();
         String executable = conf.get(JobConfigNames.CALVALUS_L2_OPERATOR + parameterSuffix);
         String processorParameters = conf.get(JobConfigNames.CALVALUS_L2_PARAMETERS + parameterSuffix);
+        String tableOutputFilename = null;
         if (getInputParameters().length > 0) {
             final StringBuilder accu = new StringBuilder(processorParameters);
             for (int i=0; i<getInputParameters().length; i+=2) {
-                if (! "output".equals(getInputParameters()[i])) {
+                if ("output".equals(getInputParameters()[i])) {
+                    tableOutputFilename = getInputParameters()[i+1];
+                } else if ("regionGeometry".equals(getInputParameters()[i])) {
+                    conf.set("calvalus.regionGeometry", getInputParameters()[i + 1]);
+                } else {
                     if (accu.length() > 0) {
                         accu.append('\n');
                     }
@@ -341,6 +358,7 @@ public class ExecutableProcessorAdapter extends ProcessorAdapter {
         velocityContext.put("GlobalFunctions", new SnapGraphAdapter.GlobalFunctions(getLogger()));
 
         scriptGenerator.addScriptResources(conf, parameterSuffix);
+        long t0 = System.currentTimeMillis();
         if (scriptGenerator.hasStepScript()) {
             scriptGenerator.writeScriptFiles(cwd, debugScriptGenerator);
 
@@ -366,12 +384,14 @@ public class ExecutableProcessorAdapter extends ProcessorAdapter {
             MapContext mapContext = getMapContext();
             for (String outputFileName : outputFilesNames) {
                 InputStream is = new BufferedInputStream(new FileInputStream(new File(cwd, outputFileName)));
-                Path workPath = new Path(getWorkOutputDirectoryPath(), outputFileName);
+                Path workPath = new Path(getWorkOutputDirectoryPath(),
+                                         tableOutputFilename != null ? tableOutputFilename : outputFileName);
                 OutputStream os = workPath.getFileSystem(conf).create(workPath);
                 ProductFormatter.copyAndClose(is, os, mapContext);
             }
             pm.done();
         }
+        getLogger().info("archiving done in [ms]: " + (System.currentTimeMillis() - t0));
     }
 
     @Override

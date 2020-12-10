@@ -3,6 +3,7 @@ package com.bc.calvalus.processing.l3.seasonal;
 import com.bc.calvalus.commons.CalvalusLogger;
 import com.bc.calvalus.commons.DateUtils;
 import com.bc.calvalus.processing.JobConfigNames;
+import com.bc.calvalus.processing.beam.GpfUtils;
 import com.bc.calvalus.processing.l2.ProductFormatter;
 import com.bc.calvalus.processing.l3.HadoopBinManager;
 import com.bc.calvalus.processing.utils.GeometryUtils;
@@ -23,6 +24,7 @@ import org.esa.snap.core.datamodel.Band;
 import org.esa.snap.core.datamodel.CrsGeoCoding;
 import org.esa.snap.core.datamodel.Product;
 import org.esa.snap.core.datamodel.ProductData;
+import org.esa.snap.runtime.Engine;
 import org.geotools.referencing.crs.DefaultGeographicCRS;
 import org.opengis.referencing.FactoryException;
 import org.opengis.referencing.operation.TransformException;
@@ -145,10 +147,24 @@ public class SeasonalCompositingReducer extends Reducer<IntWritable, BandTileWri
             return;
         }
 
+        GpfUtils.init(context.getConfiguration());
+        Engine.start();  // required here!  we do not use a ProcessorAdapter
+        CalvalusLogger.restoreCalvalusLogFormatter();
+
         final int bandNumber = (context.getCurrentKey().get() >>> 22) & 0x1f;
         final int numberOfBands = context.getCurrentKey().get() >>> 27;
-        final String sensor = numberOfBands == 13 + 1 ? "MERIS" : numberOfBands == 5 + 1 ? "AVHRR" : numberOfBands == 4 + 1 ? "PROBAV" : numberOfBands == 4 + 1 ? "VEGETATION" : numberOfBands == 11 + 1 ? "MSI" : "AGRI";
-        final String bandName = "MERIS".equals(sensor) ? MERIS_BANDS[bandNumber] : "AVHRR".equals(sensor) ? AVHRR_BANDS[bandNumber] : "VEGETATION".equals(sensor) ? PROBA_BANDS[bandNumber] : "PROBAV".equals(sensor) ? PROBA_BANDS[bandNumber] : "MSI".equals(sensor) ? MSI_BANDS[bandNumber] : AGRI_BANDS[bandNumber];
+        final String sensor =
+                "OLCI".equals(conf.get("calvalus.lc.sensor", "unknown")) ? "OLCI" :
+                        numberOfBands == 13 + 1 ? "MERIS" :
+                                numberOfBands == 5 + 1 ? "AVHRR" :
+                                        numberOfBands == 4 + 1 ? "PROBAV" :
+                                                numberOfBands == 4 + 1 ? "VEGETATION" :
+                                                        numberOfBands == 11 + 1 ? "MSI" : "AGRI";
+        final String bandName = "MERIS".equals(sensor) || "OLCI".equals(sensor) ? MERIS_BANDS[bandNumber] :
+                "AVHRR".equals(sensor) ? AVHRR_BANDS[bandNumber] :
+                        "VEGETATION".equals(sensor) ? PROBA_BANDS[bandNumber] :
+                                "PROBAV".equals(sensor) ? PROBA_BANDS[bandNumber] :
+                                        "MSI".equals(sensor) ? MSI_BANDS[bandNumber] : AGRI_BANDS[bandNumber];
 
         final Date start = getDate(conf, JobConfigNames.CALVALUS_MIN_DATE);
         final Date stop = getDate(conf, JobConfigNames.CALVALUS_MAX_DATE);
@@ -162,8 +178,8 @@ public class SeasonalCompositingReducer extends Reducer<IntWritable, BandTileWri
         } catch (BindingException e) {
             throw new IllegalArgumentException("no numRows in L3 parameters " + conf.get(JobConfigNames.CALVALUS_L3_PARAMETERS));
         }
-        final int resolution = mosaicHeight == 972000 ? 20 : mosaicHeight == 64800 ? 300 : mosaicHeight == 64800 ? 300 : mosaicHeight == 16200 ? 1000 : mosaicHeight == 20160 ? 1000 : mosaicHeight == 60480 ? 333 : 19440000 / mosaicHeight;
-        final int numTileRows = "MSI".equals(sensor) || "AGRI".equals(sensor) ? 180*5 : 36;
+        final int resolution = mosaicHeight == 972000 ? 20 : mosaicHeight == 64800 ? 300 : mosaicHeight == 16200 ? 1000 : mosaicHeight == 20160 ? 1000 : mosaicHeight == 60480 ? 333 : 19440000 / mosaicHeight;
+        final int numTileRows = "MSI".equals(sensor) || "AGRI".equals(sensor) ? 180*5 : "OLCI".equals(sensor) ? 18*2 : 36;
         final int numTileColumns = 2 * numTileRows;
         final int tileSize = mosaicHeight / numTileRows;  // 64800 / 36 = 1800, 16200 / 36 = 450, 972000 / 72*5 = 2700
 
@@ -183,13 +199,14 @@ public class SeasonalCompositingReducer extends Reducer<IntWritable, BandTileWri
             tileArea = tileAreaOf(Reprojector.computeRasterSubRegion(planetaryGrid, regionGeometry), tileSize);
             pixelArea = pixelAreaOf(tileArea, tileSize);
             LOG.info("tile area=" + tileArea);
-         }
+        }
 
         final String version = conf.get(JobConfigNames.CALVALUS_LC_VERSION, "2.0");
         final double pixelRef = conf.getDouble("calvalus.lc.pixelref", "PROBAV".equals(sensor) ? 0.5 : 0.0);
         final String targetFileName = String.format("ESACCI-LC-L3-SR-%s-%dm-P%d%s-%s-%s%s-v%s",
                                                     sensor, resolution,
-                                                    "MSI".equals(sensor) || "AGRI".equals(sensor) ? noOfDays : noOfDays / 7, "MSI".equals(sensor) || "AGRI".equals(sensor) ? "D" : "W",
+                                                    "MSI".equals(sensor) || "AGRI".equals(sensor) ? noOfDays : noOfDays / 7,
+                                                    "MSI".equals(sensor) || "AGRI".equals(sensor) ? "D" : "W",
                                                     bandName,
                                                     regionName == null ? "" : regionName + "-",
                                                     COMPACT_DATE_FORMAT.format(start), version);
@@ -235,6 +252,7 @@ public class SeasonalCompositingReducer extends Reducer<IntWritable, BandTileWri
 
         boolean moreTilesAvailable = true;
         final float[][] tiles = new float[numTileColumns][];
+        // loop over micro tile rows, e.g. up to 36 for OLCI
         for (int tileRow = (context.getCurrentKey().get() >>> 11) & 0x7FF; tileRow < numTileRows && moreTilesAvailable; ++tileRow) {
 
             //LOG.info("processing tile row " + tileRow);
@@ -242,7 +260,7 @@ public class SeasonalCompositingReducer extends Reducer<IntWritable, BandTileWri
             int count = 0;
             while (moreTilesAvailable && ((context.getCurrentKey().get() >>> 11) & 0x7FF) == tileRow) {
                 final int tileColumn = context.getCurrentKey().get() & 0x7FF;
-                LOG.info("looking at tile " + context.getCurrentKey().get() + " tile row " + tileRow + " column " + tileColumn);
+                //LOG.info("looking at tile " + context.getCurrentKey().get() + " tile row " + tileRow + " column " + tileColumn);
                 tiles[tileColumn] = copyOf(context.getValues().iterator().next().getTileData());
                 ++count;
                 if (! context.nextKey()) {
@@ -250,7 +268,7 @@ public class SeasonalCompositingReducer extends Reducer<IntWritable, BandTileWri
                     LOG.info("no more tiles in context.");
                 }
             }
-            LOG.info(count + " tiles in tile row " + tileRow);
+            LOG.info(count + " micro tiles in tile row " + tileRow);
 
             if (tileRow >= tileArea.y && tileRow < tileArea.y + tileArea.height) {
                 // write lines of tile row to output file

@@ -8,10 +8,9 @@ import org.esa.snap.binning.support.VectorImpl;
 import org.junit.Before;
 import org.junit.Test;
 
-import java.util.HashMap;
-
 import static java.lang.Float.NaN;
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 
 /**
  * TODO add API doc
@@ -113,24 +112,7 @@ public class AggregatorFirstTest {
     }
 
     public static BinContext createCtx() {
-        return new BinContext() {
-            private HashMap<String, Object> map = new HashMap<String, Object>();
-
-            @Override
-            public long getIndex() {
-                return 0;
-            }
-
-            @Override
-            public <T> T get(String name) {
-                return (T) map.get(name);
-            }
-
-            @Override
-            public void put(String name, Object value) {
-                map.put(name, value);
-            }
-        };
+        return new TestBinContext();
     }
 
     static class MyVariableContext implements VariableContext {

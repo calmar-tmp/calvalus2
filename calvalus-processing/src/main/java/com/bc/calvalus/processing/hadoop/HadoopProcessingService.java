@@ -73,8 +73,8 @@ import java.util.logging.Logger;
 public class HadoopProcessingService implements ProcessingService<JobID> {
 
     public static final String CALVALUS_SOFTWARE_PATH = "/calvalus/software/1.0";
-    public static final String DEFAULT_CALVALUS_BUNDLE = "calvalus-2.16-SNAPSHOT";
-    public static final String DEFAULT_SNAP_BUNDLE = "snap-5.0";
+    public static final String DEFAULT_CALVALUS_BUNDLE = "calvalus-2.19-SNAPSHOT";
+    public static final String DEFAULT_SNAP_BUNDLE = "snap-8.0.0-SNAPSHOT";
     public static final String BUNDLE_DESCRIPTOR_XML_FILENAME = "bundle-descriptor.xml";
     private static final long CACHE_RETENTION = 30 * 1000;
 
@@ -88,6 +88,7 @@ public class HadoopProcessingService implements ProcessingService<JobID> {
     private final Logger logger;
     private final ExecutorService executorService = Executors.newFixedThreadPool(3);
     private boolean withExternalAccessControl;
+    private HadoopLaunchHandler hadoopLaunchHandler = null;
 
     private static JobClientsMap jobClientsMapSingleton = null;
 
@@ -119,7 +120,17 @@ public class HadoopProcessingService implements ProcessingService<JobID> {
         this.bundleCache = new HashMap<>();
         this.shapeAttributeCache = new HashMap<>();
         this.logger = Logger.getLogger("com.bc.calvalus");
+        if (jobClientsMap.getConfiguration().get("calvalus.openstack.startcmd") != null) {
+            hadoopLaunchHandler = new HadoopLaunchHandler(this, jobClientsMap.getConfiguration());
+        }
     }
+
+    public HadoopLaunchHandler getHadoopLaunchHandler() {
+        return hadoopLaunchHandler;
+    }
+
+    @Override
+    public Timer getTimer() { return bundlesQueryCleaner; }
 
     @Override
     public BundleDescriptor[] getBundles(final String username, final BundleFilter filter) throws IOException {
@@ -207,17 +218,28 @@ public class HadoopProcessingService implements ProcessingService<JobID> {
                     filter.withProvider(BundleFilter.PROVIDER_SYSTEM);
                 }
                 if (filter.isProviderSupported(BundleFilter.PROVIDER_USER) && filter.getUserName() != null) {
-                    String bundleLocationPattern = String.format("/calvalus/home/%s/software/%s/%s", username, bundleDirName,
-                                                                 BUNDLE_DESCRIPTOR_XML_FILENAME);
+
+                    String bundleLocationPattern;
+                    if (bundleDirName.startsWith("/")) {
+                        bundleLocationPattern = String.format("%s/%s", bundleDirName, BUNDLE_DESCRIPTOR_XML_FILENAME);
+                    } else {
+                        bundleLocationPattern = String.format("/calvalus/home/%s/software/%s/%s", username, bundleDirName,
+                                                              BUNDLE_DESCRIPTOR_XML_FILENAME);
+                    }
                     FileSystem fileSystem = getFileSystem(username, bundleLocationPattern);
                     List<BundleDescriptor> singleUserDescriptors = getBundleDescriptors(fileSystem, bundleLocationPattern, filter);
                     for (BundleDescriptor bundleDescriptor : singleUserDescriptors) {
-                        bundleDescriptor.setOwner(filter.getUserName().toLowerCase());
+                        bundleDescriptor.setOwner(filter.getUserName());
                     }
                     descriptors.addAll(singleUserDescriptors);
                 }
                 if (filter.isProviderSupported(BundleFilter.PROVIDER_ALL_USERS)) {
-                    String bundleLocationPattern = String.format("/calvalus/home/%s/software/%s/%s", "*", bundleDirName, BUNDLE_DESCRIPTOR_XML_FILENAME);
+                    String bundleLocationPattern;
+                    if (bundleDirName.startsWith("/")) {
+                        bundleLocationPattern = String.format("%s/%s", bundleDirName, BUNDLE_DESCRIPTOR_XML_FILENAME);
+                    } else {
+                        bundleLocationPattern = String.format("/calvalus/home/%s/software/%s/%s", "*", bundleDirName, BUNDLE_DESCRIPTOR_XML_FILENAME);
+                    }
                     FileSystem fileSystem = getFileSystem(username, bundleLocationPattern);
                     List<BundleDescriptor> allUserDescriptors = getBundleDescriptors(fileSystem, bundleLocationPattern, filter);
                     String userPathPattern = String.format("/calvalus/home/%s/software", username);
@@ -236,7 +258,7 @@ public class HadoopProcessingService implements ProcessingService<JobID> {
                         descriptors.add(bundleDescriptor);
                     }
                 }
-                if (filter.isProviderSupported(BundleFilter.PROVIDER_SYSTEM)) {
+                if (filter.isProviderSupported(BundleFilter.PROVIDER_SYSTEM) && ! bundleDirName.startsWith("/")) {
                     String bundleLocationPattern = String.format("%s/%s/%s", softwareDir, bundleDirName, BUNDLE_DESCRIPTOR_XML_FILENAME);
                     FileSystem fileSystem = getFileSystem(username, bundleLocationPattern);
                     List<BundleDescriptor> systemDescriptors = getBundleDescriptors(fileSystem, bundleLocationPattern, filter);
@@ -283,7 +305,7 @@ public class HadoopProcessingService implements ProcessingService<JobID> {
                     if (processorDescriptors != null) {
                         for (ProcessorDescriptor processorDescriptor : processorDescriptors) {
                             if (processorDescriptor.getProcessorName().equals(filter.getProcessorName()) &&
-                                processorDescriptor.getProcessorVersion().equals(filter.getProcessorVersion())) {
+                                    processorDescriptor.getProcessorVersion().equals(filter.getProcessorVersion())) {
                                 descriptors.add(bd);
                             }
                         }
@@ -422,6 +444,10 @@ public class HadoopProcessingService implements ProcessingService<JobID> {
         return jobClientsMap.getJobClient(username);
     }
 
+    public void clearCache() {
+        jobClientsMap.removeAllEntries();
+    }
+
     @Override
     public JobIdFormat<JobID> getJobIdFormat() {
         return new HadoopJobIdFormat();
@@ -430,7 +456,15 @@ public class HadoopProcessingService implements ProcessingService<JobID> {
     @Override
     public void updateStatuses(String username) throws IOException {
         JobClient jobClient = jobClientsMap.getJobClient(username);
-        JobStatus[] jobStatuses = jobClient.getAllJobs();
+        String rmHostname = jobClientsMap.getConfiguration().get("yarn.resourcemanager.hostname");
+        logger.fine("rm host for status polling is " + rmHostname);
+        JobStatus[] jobStatuses;
+        if (rmHostname != null && ! "0.0.0.0".equals(rmHostname)) {
+            jobClient.getConf().set("yarn.resourcemanager.hostname", rmHostname);
+            jobStatuses = jobClient.getAllJobs();
+        } else {
+            jobStatuses = new JobStatus[0];
+        }
         synchronized (jobStatusMap) {
             if (jobStatuses != null && jobStatuses.length > 0) {
                 Set<JobID> allJobs = new HashSet<>(jobStatusMap.keySet());
@@ -510,7 +544,7 @@ public class HadoopProcessingService implements ProcessingService<JobID> {
 
         if (jobStatus.getRunState() == JobStatus.FAILED) {
             return new ProcessStatus(ProcessState.ERROR, oldProgress,
-                                     "Hadoop job '" + jobStatus.getJobID() + "' failed, see logs for details");
+                    "Hadoop job '" + jobStatus.getJobID() + "' failed, see logs for details");
         } else if (jobStatus.getRunState() == JobStatus.KILLED) {
             return new ProcessStatus(ProcessState.CANCELLED, oldProgress);
         } else if (jobStatus.getRunState() == JobStatus.PREP) {
@@ -595,7 +629,7 @@ public class HadoopProcessingService implements ProcessingService<JobID> {
     public static boolean isArchive(Path archivePath) {
         String filename = archivePath.getName();
         return filename.endsWith(".tgz") || filename.endsWith(".tar.gz") ||
-               filename.endsWith(".tar") || filename.endsWith(".zip");
+                filename.endsWith(".tar") || filename.endsWith(".zip");
     }
 
     static String stripArchiveExtension(String archiveName) {
@@ -622,7 +656,7 @@ public class HadoopProcessingService implements ProcessingService<JobID> {
 
     public static boolean isLib(Path libPath) {
         String filename = libPath.getName();
-        return filename.endsWith(".so");
+        return filename.endsWith(".so") || filename.contains(".so.") || filename.equals("VERSION.txt");
     }
 
 
@@ -674,7 +708,7 @@ public class HadoopProcessingService implements ProcessingService<JobID> {
             FileSystem fs = jobClientsMapSingleton.getFileSystem(userName, conf, path);
             System.out.println("HadoopProcessingService.openUrlAsStream user " + userName + " path " + url + " fileSystem " + fs);
             inputStream = fs.open(path);
-        } else if (url.startsWith("hdfs:")) {
+        } else if (url.startsWith("hdfs:") || url.startsWith("s3a")) {
             final Path path = new Path(url);
             inputStream = path.getFileSystem(conf).open(path);
         } else {

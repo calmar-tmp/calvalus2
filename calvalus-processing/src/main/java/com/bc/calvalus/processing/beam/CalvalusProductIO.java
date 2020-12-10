@@ -103,6 +103,9 @@ public class CalvalusProductIO {
                 File localFile;
                 if ("file".equals(path.toUri().getScheme())) {    // TODO: bad criterion for whether file is "local"
                     localFile = new File(path.toUri());
+                } else if (("s3a".equals(path.toUri().getScheme())
+                            || "swift".equals(path.toUri().getScheme())) && "MTD_MSIL1C.xml".equals(path.getName())) {
+                    localFile = copyFileToLocal(path.getParent(), configuration);
                 } else {
                     localFile = copyFileToLocal(path, configuration);
                 }
@@ -217,7 +220,8 @@ public class CalvalusProductIO {
 
         String archiveName = path.getName().toLowerCase();
         long localSize = 0;
-        if (archiveName.endsWith(".zip")) {
+        boolean isZippedSlstrWithoutExtension = path.getName().matches("S3._SL_1_RBT.*_NT_00.");
+        if (archiveName.endsWith(".zip") || isZippedSlstrWithoutExtension) {
             try (ZipInputStream zipIn = new ZipInputStream(inputStream)) {
                 ZipEntry entry;
                 while ((entry = zipIn.getNextEntry()) != null) {

@@ -32,6 +32,9 @@ import com.bc.calvalus.processing.hadoop.ProgressSplitProgressMonitor;
 import com.bc.ceres.core.ProgressMonitor;
 import com.bc.ceres.core.SubProgressMonitor;
 import com.bc.ceres.metadata.MetadataResourceEngine;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.vividsolutions.jts.geom.Envelope;
 import com.vividsolutions.jts.geom.Geometry;
 import com.vividsolutions.jts.io.WKTWriter;
@@ -51,9 +54,6 @@ import org.apache.hadoop.mapreduce.lib.map.WrappedMapper;
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
 import org.apache.hadoop.mapreduce.task.MapContextImpl;
 import org.apache.hadoop.mapreduce.task.TaskAttemptContextImpl;
-import org.apache.htrace.fasterxml.jackson.core.JsonParser;
-import org.apache.htrace.fasterxml.jackson.core.type.TypeReference;
-import org.apache.htrace.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.velocity.VelocityContext;
 import org.esa.snap.core.dataio.ProductIO;
 import org.esa.snap.core.datamodel.GeoCoding;
@@ -183,11 +183,20 @@ public class ProcessingMapper extends Mapper<NullWritable, NullWritable, Text /*
 
         final ProcessorAdapter processorAdapter = ProcessorFactory.createAdapter(context);
         String inputName = processorAdapter.getInputPath().getName();
-        String productName;
-        if (! "MTD_MSIL1C.xml".equals(inputName)) {  // TODO
-            productName = getProductName(jobConfig, inputName);
-        } else {
-            productName = getProductName(jobConfig, processorAdapter.getInputPath().getParent().getName());
+        String productName = null;
+        if (processorAdapter.getInputParameters() != null) {
+            for (int i = 0; i < processorAdapter.getInputParameters().length; i += 2) {
+                if ("output".equals(processorAdapter.getInputParameters()[i])) {
+                    productName = getProductName(jobConfig, processorAdapter.getInputParameters()[i + 1]);
+                }
+            }
+        }
+        if (productName == null) {
+            if (! "MTD_MSIL1C.xml".equals(inputName)) {  // TODO
+                productName = getProductName(jobConfig, inputName);
+            } else {
+                productName = getProductName(jobConfig, processorAdapter.getInputPath().getParent().getName());
+            }
         }
         final ProductFormatter productFormatter = outputFormat != null ? new ProductFormatter(productName, outputFormat, outputCompression) : null;
 
@@ -202,14 +211,16 @@ public class ProcessingMapper extends Mapper<NullWritable, NullWritable, Text /*
 
             // check and prepare, localise
 
+            long t0 = System.currentTimeMillis();
             if (productFormatter != null && checkFormattedOutputExists(jobConfig, context, productFormatter.getOutputFilename())) { return; }
             processorAdapter.prepareProcessing();
             if (checkNativeOutputExists(jobConfig, context, processorAdapter)) { return; }
             if (checkInputIntersectsRoi(jobConfig, context, processorAdapter)) { return; }
-            LOG.info("processing prepared");
+            LOG.info("preparing done in [ms]: " + (System.currentTimeMillis() - t0));
 
             // process and write native product
 
+            t0 = System.currentTimeMillis();
             if (!processorAdapter.processSourceProduct(ProcessorAdapter.MODE.EXECUTE,
                                                        SubProgressMonitor.create(pm, progressForProcessing))) {
                 LOG.warning("product has not been processed.");
@@ -227,7 +238,12 @@ public class ProcessingMapper extends Mapper<NullWritable, NullWritable, Text /*
             // re-read target product for customisation, metadata processing, quicklook generation, formatting
 
             if (checkNoFormattingRequired(jobConfig)) { return; }
-            Product targetProduct = processorAdapter.getProcessedProduct(SubProgressMonitor.create(pm, progressForProcessing));
+            Product targetProduct;
+            if (jobConfig.getBoolean("outputNative", false)) {
+                targetProduct = ProductIO.readProduct(processorAdapter.getOutputProductPath().toString());
+            } else {
+                targetProduct = processorAdapter.getProcessedProduct(SubProgressMonitor.create(pm, progressForProcessing));
+            }
             LOG.info("target product determined");
             if (checkProductEmpty(context, targetProduct)) { return; }
             targetProduct = customiseTargetProduct(jobConfig, processorAdapter, targetProduct);
@@ -248,6 +264,7 @@ public class ProcessingMapper extends Mapper<NullWritable, NullWritable, Text /*
                 writeQuicklooks(context, jobConfig, productName, targetProduct);
             }
             pm.worked(5);
+            LOG.info("processing done in [ms]: " + (System.currentTimeMillis() - t0));
 
             context.setStatus("Writing");
             if (productFormatter != null) {
@@ -418,7 +435,7 @@ public class ProcessingMapper extends Mapper<NullWritable, NullWritable, Text /*
                VelocityContext vcx = metadataResourceEngine.getVelocityContext();
                vcx.put("system", System.getProperties());
                vcx.put("softwareName", "Calvalus");
-               vcx.put("softwareVersion", "2.7-SNAPSHOT");
+               vcx.put("softwareVersion", "2.15-SNAPSHOT");
                vcx.put("processingTime", ProductData.UTC.create(new Date(), 0));
 
                File targetFile = new File(targetPath);
@@ -603,6 +620,7 @@ public class ProcessingMapper extends Mapper<NullWritable, NullWritable, Text /*
     protected Product writeProductFile(Product targetProduct, ProductFormatter productFormatter, Mapper.Context context,
                                        Configuration jobConfig, String outputFormat, ProgressMonitor pm) throws
             IOException, InterruptedException {
+        long t0 = System.currentTimeMillis();
         Map<String, Object> bandSubsetParameter = createBandSubsetParameter(targetProduct, jobConfig);
         if (!bandSubsetParameter.isEmpty()) {
             targetProduct = GPF.createProduct("Subset", bandSubsetParameter, targetProduct);
@@ -611,13 +629,16 @@ public class ProcessingMapper extends Mapper<NullWritable, NullWritable, Text /*
         File productFile = productFormatter.createTemporaryProductFile();
         LOG.info("Start writing product to file: " + productFile.getName());
 
-        ProductIO.writeProduct(targetProduct, productFile, outputFormat, false, pm);
-        LOG.info("Formatted product file written");
+        //ProductIO.writeProduct(targetProduct, productFile, outputFormat, false, pm);
+        GPF.writeProduct(targetProduct, productFile, outputFormat, false, pm);
+        LOG.info("formatting done in [ms]: " + (System.currentTimeMillis() - t0));
 
+        t0 = System.currentTimeMillis();
         context.setStatus("Copying");
         productFormatter.compressToHDFS(context, productFile);
         context.getCounter(COUNTER_GROUP_NAME_PRODUCTS, "Product formatted").increment(1);
         LOG.info("Formatted product " + productFile.getName() + " archived in " + FileOutputFormat.getWorkOutputPath(context));
+        LOG.info("archiving done in [ms]: " + (System.currentTimeMillis() - t0));
         return targetProduct;
     }
 
